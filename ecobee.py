@@ -152,6 +152,20 @@ def refresh_token():
                         break
             
             if token:
+                # Decode token to check expiration
+                payload_b64 = token.split(".")[1]
+                payload_b64 += "=" * (4 - len(payload_b64) % 4)
+                payload = json.loads(base64.urlsafe_b64decode(payload_b64))
+                
+                token_exp = payload.get("exp", 0)
+                
+                # Validate token is actually fresh (expires more than 5 min in future)
+                if token_exp < time.time() + 300:
+                    print(f"   Token is expired or expiring soon (exp: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(token_exp))})")
+                    print("   Session cookies have expired, need to login again")
+                    browser.close()
+                    return None
+                
                 # Save updated session
                 save_session(cookies)
                 
@@ -164,11 +178,6 @@ def refresh_token():
                 
                 browser.close()
                 
-                # Decode token
-                payload_b64 = token.split(".")[1]
-                payload_b64 += "=" * (4 - len(payload_b64) % 4)
-                payload = json.loads(base64.urlsafe_b64decode(payload_b64))
-                
                 # Load existing token data to preserve thermostat_id
                 old_data = {}
                 if TOKEN_FILE.exists():
@@ -179,7 +188,7 @@ def refresh_token():
                 
                 token_data = {
                     "access_token": token,
-                    "expires_at": payload.get("exp", time.time() + 3600),
+                    "expires_at": token_exp,
                     "account_id": payload.get("https://claims.ecobee.com/ecobee_account_id"),
                     "thermostat_id": thermostat_id or old_data.get("thermostat_id")
                 }
