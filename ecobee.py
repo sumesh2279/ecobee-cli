@@ -4,14 +4,15 @@ Ecobee CLI - Unofficial CLI for Ecobee Thermostats
 Since Ecobee killed their public API, this uses their internal web API.
 
 Usage:
-    ecobee login           # Login via browser (one-time setup)
-    ecobee status          # Show thermostat status
-    ecobee set-temp <temp> # Set temperature (hold)
-    ecobee set-mode <mode> # Set system mode (heat/cool/auto/off)
-    ecobee resume          # Resume scheduled program
-    ecobee sensors         # Show sensor readings
+    ecobee setup-auto-login    # Configure automated login (recommended!)
+    ecobee login               # Manual login via browser
+    ecobee status              # Show thermostat status
+    ecobee set-temp <temp>     # Set temperature (hold)
+    ecobee set-mode <mode>     # Set system mode (heat/cool/auto/off)
+    ecobee resume              # Resume scheduled program
+    ecobee sensors             # Show sensor readings
 
-Token auto-refreshes using saved browser session. You only need to login once!
+With auto-login configured, all commands auto-authenticate when needed!
 """
 
 import argparse
@@ -29,6 +30,7 @@ from pathlib import Path
 DATA_DIR = Path.home() / ".ecobee"
 TOKEN_FILE = DATA_DIR / "token.json"
 SESSION_FILE = DATA_DIR / "session.json"  # Saved browser session
+CREDENTIALS_FILE = DATA_DIR / "credentials.json"  # Stored credentials for auto-login
 
 API_BASE = "https://api.ecobee.com"
 
@@ -59,7 +61,13 @@ def load_token():
             new_token = refresh_token()
             if new_token:
                 return new_token
-            print("⚠️  Could not refresh token, please login again")
+            # Refresh failed, try automated login if credentials exist
+            if load_credentials():
+                print("⏳ Trying automated login...")
+                new_token = automated_login()
+                if new_token:
+                    return new_token
+            print("⚠️  Could not refresh token, please run: ecobee setup-auto-login")
         except Exception as e:
             print(f"Error loading token: {e}")
     return None
@@ -92,6 +100,126 @@ def load_session():
         except Exception:
             pass
     return None
+
+
+def save_credentials(username, password):
+    """Save credentials for automated login."""
+    ensure_data_dir()
+    creds = {
+        "username": username,
+        "password": password,
+        "saved_at": time.time()
+    }
+    CREDENTIALS_FILE.write_text(json.dumps(creds, indent=2))
+    CREDENTIALS_FILE.chmod(0o600)
+
+
+def load_credentials():
+    """Load saved credentials."""
+    if CREDENTIALS_FILE.exists():
+        try:
+            return json.loads(CREDENTIALS_FILE.read_text())
+        except Exception:
+            pass
+    return None
+
+
+def automated_login():
+    """Perform automated headless login using saved credentials."""
+    creds = load_credentials()
+    if not creds:
+        print("   No saved credentials found")
+        return None
+    
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        print("   Playwright not installed")
+        return None
+    
+    print("   Attempting automated login...")
+    
+    # Auth0 login URL (from ecobee's web app)
+    AUTH_URL = "https://auth.ecobee.com/authorize?response_type=token&response_mode=form_post&client_id=183eORFPlXyz9BbDZwqexHPBQoVjgadh&redirect_uri=https://www.ecobee.com/home/authCallback&audience=https://prod.ecobee.com/api/v1&scope=openid%20smartWrite%20piiWrite%20piiRead%20smartRead%20deleteGrants"
+    
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            context = browser.new_context()
+            page = context.new_page()
+            
+            # Navigate directly to Auth0 login
+            page.goto(AUTH_URL, timeout=30000)
+            
+            # Wait for username field and fill it
+            page.wait_for_selector('input#username', timeout=15000)
+            page.fill('input#username', creds["username"])
+            
+            # Press Enter to submit (more reliable than clicking)
+            page.press('input#username', 'Enter')
+            
+            # Wait for password field
+            page.wait_for_selector('input[type="password"]', timeout=15000)
+            page.fill('input[type="password"]', creds["password"])
+            
+            # Press Enter to submit password
+            page.press('input[type="password"]', 'Enter')
+            
+            # Wait for successful login (token in cookies)
+            token = None
+            thermostat_id = None
+            
+            for i in range(60):  # Wait up to 60 seconds
+                time.sleep(1)
+                
+                cookies = context.cookies()
+                for cookie in cookies:
+                    if cookie["name"] == "_TOKEN":
+                        token = cookie["value"]
+                        break
+                
+                if token:
+                    # Wait for page to fully load
+                    time.sleep(3)
+                    
+                    # Extract thermostat ID from URL if available
+                    url = page.url
+                    if "/thermostats/" in url:
+                        parts = url.split("/thermostats/")
+                        if len(parts) > 1:
+                            thermostat_id = parts[1].split("/")[0].split("?")[0]
+                    
+                    # Save session
+                    save_session(cookies)
+                    break
+            
+            if not token:
+                browser.close()
+                print("   Automated login failed (no token received)")
+                print(f"   Final URL: {page.url}")
+                return None
+            
+            browser.close()
+            
+            # Decode token
+            payload_b64 = token.split(".")[1]
+            payload_b64 += "=" * (4 - len(payload_b64) % 4)
+            payload = json.loads(base64.urlsafe_b64decode(payload_b64))
+            
+            token_data = {
+                "access_token": token,
+                "expires_at": payload.get("exp", time.time() + 3600),
+                "account_id": payload.get("https://claims.ecobee.com/ecobee_account_id"),
+                "thermostat_id": thermostat_id
+            }
+            
+            save_token(token_data)
+            print("   ✅ Automated login successful!")
+            return token_data
+            
+    except Exception as e:
+        print(f"   Automated login error: {e}")
+        return None
 
 
 def refresh_token():
@@ -139,9 +267,9 @@ def refresh_token():
             if not token:
                 # Maybe we got redirected to login
                 if "login" in page.url.lower() or "auth" in page.url.lower():
-                    print("   Session expired, need to login again")
+                    print("   Session expired, trying automated login...")
                     browser.close()
-                    return None
+                    return automated_login()
                 
                 # Try waiting a bit more
                 time.sleep(5)
@@ -162,9 +290,10 @@ def refresh_token():
                 # Validate token is actually fresh (expires more than 5 min in future)
                 if token_exp < time.time() + 300:
                     print(f"   Token is expired or expiring soon (exp: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(token_exp))})")
-                    print("   Session cookies have expired, need to login again")
+                    print("   Session cookies expired, trying automated login...")
                     browser.close()
-                    return None
+                    # Try automated login instead
+                    return automated_login()
                 
                 # Save updated session
                 save_session(cookies)
@@ -694,6 +823,47 @@ def cmd_raw(args):
     print(json.dumps(result, indent=2))
 
 
+def cmd_setup_auto_login(args):
+    """Setup automated login with stored credentials."""
+    import getpass
+    
+    print("🔐 Automated Login Setup")
+    print("=" * 50)
+    print("This will store your Ecobee credentials securely")
+    print(f"in: {CREDENTIALS_FILE}")
+    print()
+    print("⚠️  WARNING: Credentials will be stored in plain text")
+    print("   (file permissions: 0600 - only you can read)")
+    print()
+    
+    username = input("Ecobee Email: ").strip()
+    password = getpass.getpass("Ecobee Password: ")
+    
+    if not username or not password:
+        print("❌ Username and password are required")
+        sys.exit(1)
+    
+    print("\n⏳ Testing login...")
+    
+    # Save credentials
+    save_credentials(username, password)
+    
+    # Test automated login
+    result = automated_login()
+    
+    if result:
+        print("\n✅ Automated login configured successfully!")
+        print("   Your credentials are saved.")
+        print("   All future commands will auto-login when needed.")
+    else:
+        print("\n❌ Login test failed")
+        print("   Please check your credentials and try again.")
+        # Remove failed credentials
+        if CREDENTIALS_FILE.exists():
+            CREDENTIALS_FILE.unlink()
+        sys.exit(1)
+
+
 def cmd_logout(args):
     """Clear saved credentials."""
     removed = []
@@ -703,6 +873,9 @@ def cmd_logout(args):
     if SESSION_FILE.exists():
         SESSION_FILE.unlink()
         removed.append("session")
+    if CREDENTIALS_FILE.exists():
+        CREDENTIALS_FILE.unlink()
+        removed.append("credentials")
     
     if removed:
         print(f"✅ Cleared: {', '.join(removed)}")
@@ -716,7 +889,8 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  ecobee login              # One-time setup (opens browser)
+  ecobee setup-auto-login   # Configure automated login (RECOMMENDED!)
+  ecobee login              # Manual login (opens browser)
   ecobee status             # Show current status
   ecobee set-temp 22        # Set to 22°C
   ecobee set-temp 72 -f     # Set to 72°F
@@ -730,6 +904,9 @@ Examples:
     
     # Login
     subparsers.add_parser("login", help="Login to Ecobee (one-time setup)")
+    
+    # Setup auto-login
+    subparsers.add_parser("setup-auto-login", help="Configure automated headless login")
     
     # Logout
     subparsers.add_parser("logout", help="Clear saved credentials")
@@ -771,6 +948,7 @@ Examples:
     
     commands = {
         "login": cmd_login,
+        "setup-auto-login": cmd_setup_auto_login,
         "logout": cmd_logout,
         "status": cmd_status,
         "set-temp": cmd_set_temp,

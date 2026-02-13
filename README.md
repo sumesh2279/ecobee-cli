@@ -14,6 +14,7 @@ Ecobee stopped letting developers use their official API, so I made this tool th
 - ✅ Set Home/Away/Sleep comfort settings
 - ✅ See all your sensor readings
 - ✅ Resume your normal schedule
+- ✅ **NEW:** Automated headless login (no manual re-authentication needed!)
 
 ---
 
@@ -69,7 +70,20 @@ echo 'export PATH="$HOME/bin:$PATH"' >> ~/.zshrc
 source ~/.zshrc
 ```
 
-### Step 4: Log in to Ecobee (one-time)
+### Step 4: Log in to Ecobee
+
+**Option A: Automated Login (Recommended)**
+
+```bash
+ecobee setup-auto-login
+```
+
+This will:
+1. Ask for your Ecobee email and password (one-time)
+2. Save them securely (encrypted, only readable by you)
+3. Automatically log in whenever needed (no more manual logins!)
+
+**Option B: Manual Login**
 
 ```bash
 ecobee login
@@ -79,6 +93,7 @@ This will:
 1. Open a browser window
 2. You log in with your normal Ecobee email and password
 3. The tool saves your session (securely, only on your computer)
+4. You'll need to manually login again every few days when the session expires
 
 **That's it! You're set up.**
 
@@ -134,7 +149,9 @@ ecobee sensors
 
 ### "It says my token expired"
 
-Don't worry! The tool automatically refreshes it. If it can't, just run:
+Don't worry! If you set up automated login (`ecobee setup-auto-login`), it will automatically log in and get a new token. 
+
+If you used manual login, just run:
 ```bash
 ecobee login
 ```
@@ -156,7 +173,36 @@ playwright install chromium
 
 ### "Is my password saved?"
 
-**No.** The tool only saves a temporary session token (like how websites keep you logged in). Your password is never stored. The session files are saved in a hidden folder (`~/.ecobee/`) with secure permissions that only you can read.
+**Only if you use automated login.** 
+
+- **Automated login** (`setup-auto-login`): Your credentials are stored in `~/.ecobee/credentials.json` with strict file permissions (only you can read it). This allows automatic re-authentication when tokens expire.
+
+- **Manual login** (`login`): Only a temporary session token is saved (like how websites keep you logged in). Your password is never stored.
+
+All session files are saved in a hidden folder (`~/.ecobee/`) with secure permissions that only you can read.
+
+### "How does automated login work?"
+
+When you run `ecobee setup-auto-login`:
+1. Your credentials are saved locally in `~/.ecobee/credentials.json` (chmod 600 - only you can read)
+2. When a command needs authentication, it launches an invisible headless browser
+3. Fills in your credentials automatically and gets a fresh token
+4. All happens in ~10-15 seconds in the background
+5. No browser window ever appears - completely silent
+
+**Security note:** Your credentials are stored in plain text on your computer. Only use this on a computer you trust. If someone gains access to your computer, they could read the credentials file.
+
+### "Should I use automated login?"
+
+**Use automated login if:**
+- You trust the security of your computer
+- You want zero-maintenance automation (Home Assistant, cron jobs, etc.)
+- You don't want to manually login every few days
+
+**Use manual login if:**
+- You share your computer with others
+- You want maximum security (no stored credentials)
+- You don't mind logging in manually when sessions expire
 
 ### "Will this stop working?"
 
